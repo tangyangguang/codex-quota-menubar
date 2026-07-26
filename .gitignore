@@ -1,0 +1,8 @@
+.build/
+.swiftpm/
+.DS_Store
+*.xcuserstate
+outputs/
+work/
+Resources/CodexMenuIcon*.png
+Scripts/make-codex-menu-icon.swift
