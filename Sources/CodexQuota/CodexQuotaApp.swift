@@ -10,7 +10,10 @@ struct CodexQuotaApp: App {
         MenuBarExtra {
             PopoverView(model: model)
                 .onAppear {
-                    model.refresh()
+                    model.panelDidAppear()
+                }
+                .onDisappear {
+                    model.panelDidDisappear()
                 }
         } label: {
             HStack(spacing: 3) {

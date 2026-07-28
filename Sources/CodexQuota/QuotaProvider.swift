@@ -78,8 +78,10 @@ struct QuotaProvider: Sendable {
         files.sort { $0.1 > $1.1 }
 
         var newest: QuotaSnapshot?
-        for (url, _) in files.prefix(120) {
-            guard let data = tail(of: url, maximumBytes: 1_500_000) else { continue }
+        // 只看最近修改的少量文件，且每个只读尾部少量字节，
+        // 避免在大会话目录（可能数 GB）上产生磁盘 IO 风暴。
+        for (url, _) in files.prefix(40) {
+            guard let data = tail(of: url, maximumBytes: 256_000) else { continue }
             for line in data.split(separator: 0x0A).reversed() {
                 guard line.contains(Data(#""rate_limits""#.utf8)),
                       let snapshot = QuotaParser.logSnapshot(from: Data(line))
@@ -165,6 +167,18 @@ private final class AppServerOperation: @unchecked Sendable {
         }
     }
 
+    /// 强制终止子进程，并在短暂宽限后确保它已退出（terminate 未生效则 SIGKILL 兑底）。
+    private func forceTerminate(_ process: Process) {
+        guard process.isRunning else { return }
+        process.terminate()
+        let pid = process.processIdentifier
+        DispatchQueue.global().asyncAfter(deadline: .now() + 1) {
+            if process.isRunning {
+                kill(pid, SIGKILL)
+            }
+        }
+    }
+
     private func consume(_ data: Data) {
         lock.lock()
         buffer.append(data)
@@ -205,8 +219,8 @@ private final class AppServerOperation: @unchecked Sendable {
         lock.unlock()
 
         (process?.standardOutput as? Pipe)?.fileHandleForReading.readabilityHandler = nil
-        if process?.isRunning == true {
-            process?.terminate()
+        if let process, process.isRunning {
+            forceTerminate(process)
         }
         continuation.resume(with: result)
         keepAlive = nil

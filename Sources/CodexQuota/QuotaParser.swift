@@ -83,10 +83,16 @@ enum QuotaParser {
         return nil
     }
 
-    private static func parseISO8601(_ value: String) -> Date? {
+    // ISO8601DateFormatter 的 date(from:) 是线程安全的（Apple 文档保证），
+    // 缓存一个实例避免每次解析都新建。
+    nonisolated(unsafe) private static let iso8601Formatter: ISO8601DateFormatter = {
         let formatter = ISO8601DateFormatter()
         formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        return formatter.date(from: value)
+        return formatter
+    }()
+
+    private static func parseISO8601(_ value: String) -> Date? {
+        iso8601Formatter.date(from: value)
     }
 
     private static func weeklyWindow(in windows: [RateWindow]) -> RateWindow? {

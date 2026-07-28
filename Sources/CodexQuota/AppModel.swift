@@ -35,8 +35,14 @@ final class AppModel {
     private(set) var errorMessage: String?
     private let provider = QuotaProvider()
     @ObservationIgnored private var automaticRefreshTimer: Timer?
+    @ObservationIgnored private var isPanelVisible = false
+    @ObservationIgnored private var isAsleep = false
 
     private static let refreshIntervalDefaultsKey = "refreshIntervalSeconds"
+
+    /// 面板关闭（后台）时的保底刷新间隔：至少 5 分钟。
+    /// 额度数据以小时计变化，后台无需频繁拉起 255MB 的 codex 进程。
+    private static let backgroundMinimumInterval: TimeInterval = 300
 
     /// 当前自动刷新间隔。修改后会持久化并重建定时器。
     var refreshInterval: RefreshInterval {
@@ -50,6 +56,15 @@ final class AppModel {
     init() {
         let stored = UserDefaults.standard.integer(forKey: Self.refreshIntervalDefaultsKey)
         refreshInterval = RefreshInterval(rawValue: stored) ?? .default
+    }
+
+    /// 根据面板是否可见选择实际调度间隔：
+    /// 可见时用用户设定的高频间隔，后台时取与保底间隔的较大值。
+    private var activeInterval: TimeInterval {
+        if isPanelVisible {
+            return refreshInterval.seconds
+        }
+        return max(refreshInterval.seconds, Self.backgroundMinimumInterval)
     }
 
     var menuBarText: String {
@@ -80,7 +95,22 @@ final class AppModel {
         scheduleAutomaticRefresh()
     }
 
-    /// 按当前间隔重建定时器（用户切换刷新间隔后调用）。
+    /// 面板打开：立即刷新拿最新数据，并切到高频间隔。
+    func panelDidAppear() {
+        isPanelVisible = true
+        guard !isAsleep else { return }
+        refresh()
+        restartAutomaticRefresh()
+    }
+
+    /// 面板关闭：切回后台保底间隔，减少无人查看时的拉起次数。
+    func panelDidDisappear() {
+        isPanelVisible = false
+        guard !isAsleep else { return }
+        restartAutomaticRefresh()
+    }
+
+    /// 按当前情境重建定时器（刷新间隔或面板可见性变化后调用）。
     func restartAutomaticRefresh() {
         automaticRefreshTimer?.invalidate()
         automaticRefreshTimer = nil
@@ -88,7 +118,8 @@ final class AppModel {
     }
 
     private func scheduleAutomaticRefresh() {
-        let timer = Timer(timeInterval: refreshInterval.seconds, repeats: true) { [weak self] _ in
+        guard !isAsleep else { return }
+        let timer = Timer(timeInterval: activeInterval, repeats: true) { [weak self] _ in
             Task { @MainActor in
                 self?.refresh()
             }
@@ -119,11 +150,13 @@ final class AppModel {
     }
 
     private func pauseAutomaticRefresh() {
+        isAsleep = true
         automaticRefreshTimer?.invalidate()
         automaticRefreshTimer = nil
     }
 
     private func resumeAutomaticRefresh() {
+        isAsleep = false
         guard automaticRefreshTimer == nil else { return }
         refresh()
         scheduleAutomaticRefresh()
