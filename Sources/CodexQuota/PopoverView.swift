@@ -3,6 +3,7 @@ import SwiftUI
 
 struct PopoverView: View {
     @Bindable var model: AppModel
+    @State private var isShowingSettings = false
 
     private static let dateFormatter: DateFormatter = {
         let formatter = DateFormatter()
@@ -19,6 +20,20 @@ struct PopoverView: View {
     }()
 
     var body: some View {
+        Group {
+            if isShowingSettings {
+                settingsView
+            } else {
+                mainView
+            }
+        }
+        .padding(16)
+        .frame(width: 286)
+    }
+
+    // MARK: - 主页面
+
+    private var mainView: some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack {
                 Text("Codex 本周额度")
@@ -76,6 +91,22 @@ struct PopoverView: View {
                         .foregroundStyle(.tertiary)
                 }
                 Spacer()
+                Button {
+                    withAnimation(.easeInOut(duration: 0.15)) {
+                        isShowingSettings = true
+                    }
+                } label: {
+                    Image(systemName: "gearshape")
+                }
+                .buttonStyle(.plain)
+                .focusable(false)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .help("设置")
+
+                Spacer()
+                    .frame(width: 28)
+
                 Button("退出") {
                     NSApplication.shared.terminate(nil)
                 }
@@ -85,7 +116,67 @@ struct PopoverView: View {
                 .foregroundStyle(.secondary)
             }
         }
-        .padding(16)
-        .frame(width: 286)
+    }
+
+    // MARK: - 设置页面
+
+    private var settingsView: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                Button {
+                    withAnimation(.easeInOut(duration: 0.15)) {
+                        isShowingSettings = false
+                    }
+                } label: {
+                    Image(systemName: "chevron.left")
+                    Text("返回")
+                }
+                .buttonStyle(.plain)
+                .focusable(false)
+                .font(.callout)
+                .foregroundStyle(.secondary)
+
+                Spacer()
+
+                Text("设置")
+                    .font(.headline)
+            }
+
+            Divider()
+
+            VStack(alignment: .leading, spacing: 4) {
+                Text("自动刷新间隔")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+
+                ForEach(RefreshInterval.allCases) { interval in
+                    Button {
+                        model.refreshInterval = interval
+                    } label: {
+                        HStack {
+                            Text(interval.label)
+                                .foregroundStyle(.primary)
+                            Spacer()
+                            if model.refreshInterval == interval {
+                                Image(systemName: "checkmark")
+                                    .foregroundStyle(.tint)
+                            }
+                        }
+                        .contentShape(Rectangle())
+                        .padding(.vertical, 5)
+                        .padding(.horizontal, 8)
+                        .background(
+                            RoundedRectangle(cornerRadius: 6)
+                                .fill(model.refreshInterval == interval
+                                      ? Color.primary.opacity(0.06)
+                                      : Color.clear)
+                        )
+                    }
+                    .buttonStyle(.plain)
+                    .focusable(false)
+                    .font(.callout)
+                }
+            }
+        }
     }
 }
