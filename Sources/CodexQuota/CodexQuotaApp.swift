@@ -12,9 +12,6 @@ struct CodexQuotaApp: App {
                 .onAppear {
                     model.panelDidAppear()
                 }
-                .onDisappear {
-                    model.panelDidDisappear()
-                }
         } label: {
             HStack(spacing: 3) {
                 Image(systemName: "terminal")
