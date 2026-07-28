@@ -40,13 +40,13 @@ enum QuotaError: LocalizedError, Sendable {
     var errorDescription: String? {
         switch self {
         case .noCodexBinary:
-            return "未找到可用的 Codex 程序"
+            return "未检测到 Codex。请先安装并登录 ChatGPT 桌面版（或 Codex CLI）后重试。"
         case .appServer(let message):
-            return "Codex 服务读取失败：\(message)"
+            return "读取额度失败：\(message)。请确认 ChatGPT / Codex 已登录。"
         case .noWeeklyWindow:
-            return "服务未返回周额度窗口"
+            return "服务未返回周额度数据，请稍后再试。"
         case .noLocalSnapshot:
-            return "没有可用的本地额度记录"
+            return "暂无额度数据。请先安装并登录 ChatGPT 桌面版（或 Codex CLI）。"
         }
     }
 }
