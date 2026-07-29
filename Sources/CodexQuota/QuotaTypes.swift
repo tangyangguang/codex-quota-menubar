@@ -1,10 +1,55 @@
 import Foundation
 
+struct CodexInstallation: Identifiable, Equatable, Sendable {
+    let path: String
+    let displayName: String
+    var accountEmail: String?
+    var planType: String?
+    var accountType: String? = nil
+    var inspectionFailed = false
+
+    var id: String { path }
+
+    var accountLabel: String {
+        if let accountEmail, !accountEmail.isEmpty {
+            if let planType, !planType.isEmpty {
+                return "\(accountEmail) · \(Self.displayName(forPlan: planType))"
+            }
+            return accountEmail
+        }
+        if accountType == "apiKey" { return "API Key" }
+        if accountType == "amazonBedrock" { return "Amazon Bedrock" }
+        return inspectionFailed ? "不可用或未登录" : "账号信息待读取"
+    }
+
+    private static func displayName(forPlan plan: String) -> String {
+        switch plan {
+        case "free": return "Free"
+        case "go": return "Go"
+        case "plus": return "Plus"
+        case "pro": return "Pro"
+        case "prolite": return "Pro Lite"
+        case "team": return "Team"
+        case "business", "self_serve_business_usage_based": return "Business"
+        case "enterprise", "enterprise_cbp_usage_based": return "Enterprise"
+        case "edu": return "Edu"
+        default: return plan
+        }
+    }
+}
+
+struct CodexAccountInfo: Equatable, Sendable {
+    let email: String?
+    let planType: String?
+    let accountType: String?
+}
+
 struct QuotaSnapshot: Equatable, Sendable {
     let remainingPercent: Double
     let resetsAt: Date
     let observedAt: Date
     let source: Source
+    var installation: CodexInstallation? = nil
 
     enum Source: String, Sendable {
         case appServer = "Codex 服务"

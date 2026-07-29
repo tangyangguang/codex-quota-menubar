@@ -1,7 +1,11 @@
 import Foundation
 
 enum QuotaParser {
-    static func appServerSnapshot(from data: Data, observedAt: Date = Date()) throws -> QuotaSnapshot {
+    static func appServerSnapshot(
+        from data: Data,
+        observedAt: Date = Date(),
+        installation: CodexInstallation? = nil
+    ) throws -> QuotaSnapshot {
         let root = try jsonObject(data)
         if let error = root["error"] as? [String: Any] {
             let message = error["message"] as? String ?? "未知错误"
@@ -21,7 +25,28 @@ enum QuotaParser {
         guard let weekly = weeklyWindow(in: windows) else {
             throw QuotaError.noWeeklyWindow
         }
-        return snapshot(from: weekly, observedAt: observedAt, source: .appServer)
+        return snapshot(
+            from: weekly,
+            observedAt: observedAt,
+            source: .appServer,
+            installation: installation
+        )
+    }
+
+    static func accountInfo(from data: Data) -> CodexAccountInfo? {
+        guard
+            let root = try? jsonObject(data),
+            root["error"] == nil,
+            let result = root["result"] as? [String: Any],
+            let account = result["account"] as? [String: Any]
+        else {
+            return nil
+        }
+        return CodexAccountInfo(
+            email: account["email"] as? String,
+            planType: account["planType"] as? String,
+            accountType: account["type"] as? String
+        )
     }
 
     static func logSnapshot(from data: Data) -> QuotaSnapshot? {
@@ -83,37 +108,43 @@ enum QuotaParser {
         return nil
     }
 
-    // ISO8601DateFormatter 的 date(from:) 是线程安全的（Apple 文档保证），
-    // 缓存一个实例避免每次解析都新建。
-    nonisolated(unsafe) private static let iso8601Formatter: ISO8601DateFormatter = {
-        let formatter = ISO8601DateFormatter()
-        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        return formatter
+    // Codex 历史日志里两种合法格式都出现过：有小数秒和无小数秒。
+    nonisolated(unsafe) private static let iso8601Formatters: [ISO8601DateFormatter] = {
+        let fractional = ISO8601DateFormatter()
+        fractional.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        let wholeSeconds = ISO8601DateFormatter()
+        wholeSeconds.formatOptions = [.withInternetDateTime]
+        return [fractional, wholeSeconds]
     }()
 
     private static func parseISO8601(_ value: String) -> Date? {
-        iso8601Formatter.date(from: value)
+        iso8601Formatters.lazy.compactMap { $0.date(from: value) }.first
     }
 
     private static func weeklyWindow(in windows: [RateWindow]) -> RateWindow? {
-        // Codex currently reports a weekly window as 10,080 minutes. Accept six
-        // days or longer so small server-side duration rounding remains compatible.
-        windows
-            .filter { $0.windowMinutes >= 6 * 24 * 60 }
-            .max { $0.windowMinutes < $1.windowMinutes }
+        // 周窗口目前是 10,080 分钟。只接受 6～8 天，并选最接近 7 天的，
+        // 避免未来新增月窗口时把“最长窗口”误认成本周额度。
+        let weeklyMinutes = 7.0 * 24 * 60
+        return windows
+            .filter { (6.0 * 24 * 60...8.0 * 24 * 60).contains($0.windowMinutes) }
+            .min {
+                abs($0.windowMinutes - weeklyMinutes) < abs($1.windowMinutes - weeklyMinutes)
+            }
     }
 
     private static func snapshot(
         from window: RateWindow,
         observedAt: Date,
-        source: QuotaSnapshot.Source
+        source: QuotaSnapshot.Source,
+        installation: CodexInstallation? = nil
     ) -> QuotaSnapshot {
         let remaining = 100.0 - window.usedPercent
         return QuotaSnapshot(
             remainingPercent: min(100.0, max(0.0, remaining)),
             resetsAt: window.resetsAt,
             observedAt: observedAt,
-            source: source
+            source: source,
+            installation: installation
         )
     }
 }

@@ -53,6 +53,35 @@ import Testing
     #expect(precise.remainingPercentText == "43.27")
 }
 
+@Test func choosesSevenDayWindowInsteadOfLongerWindow() throws {
+    let json = """
+    {"id":3,"result":{"rateLimits":{
+      "primary":{"usedPercent":7,"windowDurationMins":10080,"resetsAt":1785635488},
+      "secondary":{"usedPercent":80,"windowDurationMins":43200,"resetsAt":1787635488}
+    }}}
+    """
+    let snapshot = try QuotaParser.appServerSnapshot(from: Data(json.utf8))
+    #expect(snapshot.remainingPercent == 93)
+}
+
+@Test func parsesAccountAndTimestampWithoutFractionalSeconds() throws {
+    let accountJSON = """
+    {"id":2,"result":{"account":{"type":"chatgpt","email":"user@example.com","planType":"plus"},"requiresOpenaiAuth":true}}
+    """
+    let account = try #require(QuotaParser.accountInfo(from: Data(accountJSON.utf8)))
+    #expect(account.email == "user@example.com")
+    #expect(account.planType == "plus")
+    #expect(account.accountType == "chatgpt")
+
+    let logJSON = """
+    {"timestamp":"2026-07-14T15:24:44Z","payload":{"rate_limits":{
+      "secondary":{"used_percent":26,"window_minutes":10080,"resets_at":1784627847}
+    }}}
+    """
+    let snapshot = try #require(QuotaParser.logSnapshot(from: Data(logJSON.utf8)))
+    #expect(snapshot.observedAt == ISO8601DateFormatter().date(from: "2026-07-14T15:24:44Z"))
+}
+
 @Test func rejectsNonWeeklyOnlyResponse() {
     let json = """
     {"id":2,"result":{"rateLimits":{
@@ -67,6 +96,7 @@ import Testing
 @Test(.enabled(if: ProcessInfo.processInfo.environment["CODEX_QUOTA_LIVE_TEST"] == "1"))
 func readsLiveQuotaThroughSupportedAppServer() async throws {
     let snapshot = try await QuotaProvider().fetch()
+    #expect(snapshot.source == .appServer)
     #expect((0...100).contains(snapshot.remainingPercent))
     #expect(snapshot.resetsAt > Date())
 }

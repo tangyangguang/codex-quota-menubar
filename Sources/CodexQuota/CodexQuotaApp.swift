@@ -17,6 +17,10 @@ struct CodexQuotaApp: App {
                 Image(systemName: "terminal")
                 Text(model.menuBarText)
                     .monospacedDigit()
+                if model.hasDataWarning {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .font(.caption2)
+                }
             }
             .onAppear {
                 model.startAutomaticRefresh()

@@ -1,7 +1,15 @@
 import Foundation
 
 struct QuotaProvider: Sendable {
-    func fetch() async throws -> QuotaSnapshot {
+    /// `preferredExecutable` 非空时只读取用户明确选择的安装，绝不静默切换到另一个账号。
+    func fetch(preferredExecutable: String? = nil) async throws -> QuotaSnapshot {
+        if let preferredExecutable {
+            guard FileManager.default.isExecutableFile(atPath: preferredExecutable) else {
+                throw QuotaError.noCodexBinary
+            }
+            return try await runAppServer(installation: Self.installation(for: preferredExecutable))
+        }
+
         var serverError: Error?
         do {
             return try await fetchFromAppServer()
@@ -15,24 +23,52 @@ struct QuotaProvider: Sendable {
         throw serverError ?? QuotaError.noLocalSnapshot
     }
 
+    /// 设置页按需读取所有安装的账号信息；不影响 30 秒刷新策略。
+    func inspectInstallations() async -> [CodexInstallation] {
+        let candidates = Self.availableInstallations()
+        return await withTaskGroup(of: CodexInstallation.self) { group in
+            for installation in candidates {
+                group.addTask {
+                    guard let snapshot = try? await runAppServer(installation: installation),
+                          let inspected = snapshot.installation
+                    else {
+                        var unavailable = installation
+                        unavailable.inspectionFailed = true
+                        return unavailable
+                    }
+                    return inspected
+                }
+            }
+            var inspected: [CodexInstallation] = []
+            for await installation in group {
+                inspected.append(installation)
+            }
+            return candidates.compactMap { candidate in
+                inspected.first { $0.id == candidate.id }
+            }
+        }
+    }
+
     private func fetchFromAppServer() async throws -> QuotaSnapshot {
-        let candidates = codexCandidates()
+        let candidates = Self.availableInstallations()
         guard !candidates.isEmpty else {
             throw QuotaError.noCodexBinary
         }
 
-        var lastError: Error = QuotaError.noCodexBinary
-        for executable in candidates {
+        // 自动模式保留优先级，并保留首选安装的错误，避免后面的损坏 CLI
+        // 覆盖 ChatGPT 返回的鉴权等更有价值的信息。
+        var firstError: Error?
+        for installation in candidates {
             do {
-                return try await runAppServer(executable: executable)
+                return try await runAppServer(installation: installation)
             } catch {
-                lastError = error
+                if firstError == nil { firstError = error }
             }
         }
-        throw lastError
+        throw firstError ?? QuotaError.noCodexBinary
     }
 
-    private func codexCandidates() -> [String] {
+    static func availableInstallations() -> [CodexInstallation] {
         let home = FileManager.default.homeDirectoryForCurrentUser.path
         let paths = [
             "/Applications/ChatGPT.app/Contents/Resources/codex",
@@ -42,14 +78,36 @@ struct QuotaProvider: Sendable {
             "\(home)/.local/bin/codex"
         ]
         var seen = Set<String>()
-        return paths.filter {
-            seen.insert($0).inserted && FileManager.default.isExecutableFile(atPath: $0)
+        return paths.compactMap { path in
+            guard seen.insert(path).inserted,
+                  FileManager.default.isExecutableFile(atPath: path)
+            else { return nil }
+            return installation(for: path)
         }
     }
 
-    private func runAppServer(executable: String) async throws -> QuotaSnapshot {
+    private static func installation(for path: String) -> CodexInstallation {
+        let displayName: String
+        if path.contains("ChatGPT.app/Contents/Resources") {
+            displayName = path.hasPrefix("/Applications/") ? "ChatGPT 桌面版" : "用户目录的 ChatGPT"
+        } else if path.hasPrefix("/opt/homebrew/") {
+            displayName = "Codex CLI（Homebrew）"
+        } else if path.hasPrefix("/usr/local/") {
+            displayName = "Codex CLI（/usr/local）"
+        } else {
+            displayName = "Codex CLI（~/.local）"
+        }
+        return CodexInstallation(
+            path: path,
+            displayName: displayName,
+            accountEmail: nil,
+            planType: nil
+        )
+    }
+
+    private func runAppServer(installation: CodexInstallation) async throws -> QuotaSnapshot {
         try await withCheckedThrowingContinuation { continuation in
-            let operation = AppServerOperation(executable: executable, continuation: continuation)
+            let operation = AppServerOperation(installation: installation, continuation: continuation)
             operation.start()
         }
     }
@@ -109,18 +167,21 @@ struct QuotaProvider: Sendable {
 }
 
 private final class AppServerOperation: @unchecked Sendable {
-    private let executable: String
+    private let installation: CodexInstallation
     private let continuation: CheckedContinuation<QuotaSnapshot, Error>
     private let lock = NSLock()
     private var finished = false
     private var buffer = Data()
     private var process: Process?
+    private var accountResponseReceived = false
+    private var accountInfo: CodexAccountInfo?
+    private var rateLimitResponse: Data?
     // The pipe callbacks intentionally capture weakly. Retain the operation
     // itself until a response, process exit, or timeout completes it.
     private var keepAlive: AppServerOperation?
 
-    init(executable: String, continuation: CheckedContinuation<QuotaSnapshot, Error>) {
-        self.executable = executable
+    init(installation: CodexInstallation, continuation: CheckedContinuation<QuotaSnapshot, Error>) {
+        self.installation = installation
         self.continuation = continuation
     }
 
@@ -132,7 +193,7 @@ private final class AppServerOperation: @unchecked Sendable {
         let errors = Pipe()
         self.process = process
 
-        process.executableURL = URL(fileURLWithPath: executable)
+        process.executableURL = URL(fileURLWithPath: installation.path)
         process.arguments = ["app-server", "--stdio"]
         process.standardInput = input
         process.standardOutput = output
@@ -142,6 +203,10 @@ private final class AppServerOperation: @unchecked Sendable {
             let data = handle.availableData
             guard !data.isEmpty else { return }
             self?.consume(data)
+        }
+        // 必须持续排空 stderr，否则异常版本大量输出时可能填满管道并卡住子进程。
+        errors.fileHandleForReading.readabilityHandler = { handle in
+            _ = handle.availableData
         }
         process.terminationHandler = { [weak self] process in
             self?.finishIfNeeded(.failure(
@@ -154,7 +219,8 @@ private final class AppServerOperation: @unchecked Sendable {
             let requests = [
                 #"{"method":"initialize","id":1,"params":{"clientInfo":{"name":"codex_quota_menubar","title":"Codex 额度","version":"1.0.0"}}}"#,
                 #"{"method":"initialized"}"#,
-                #"{"method":"account/rateLimits/read","id":2,"params":{}}"#
+                #"{"method":"account/read","id":2,"params":{"refreshToken":false}}"#,
+                #"{"method":"account/rateLimits/read","id":3,"params":{}}"#
             ].joined(separator: "\n") + "\n"
             try input.fileHandleForWriting.write(contentsOf: Data(requests.utf8))
         } catch {
@@ -199,13 +265,54 @@ private final class AppServerOperation: @unchecked Sendable {
         for line in complete {
             guard
                 let object = try? JSONSerialization.jsonObject(with: line) as? [String: Any],
-                (object["id"] as? NSNumber)?.intValue == 2
+                let id = (object["id"] as? NSNumber)?.intValue
             else { continue }
-            do {
-                finishIfNeeded(.success(try QuotaParser.appServerSnapshot(from: line)))
-            } catch {
-                finishIfNeeded(.failure(error))
+
+            switch id {
+            case 2:
+                recordAccountResponse(QuotaParser.accountInfo(from: line))
+            case 3:
+                recordRateLimitResponse(line)
+            default:
+                continue
             }
+        }
+    }
+
+    private func recordAccountResponse(_ info: CodexAccountInfo?) {
+        lock.lock()
+        accountResponseReceived = true
+        accountInfo = info
+        let ready = rateLimitResponse
+        lock.unlock()
+        if let ready { finishResponse(rateLimitData: ready) }
+    }
+
+    private func recordRateLimitResponse(_ data: Data) {
+        lock.lock()
+        rateLimitResponse = data
+        let accountReady = accountResponseReceived
+        lock.unlock()
+        if accountReady { finishResponse(rateLimitData: data) }
+    }
+
+    private func finishResponse(rateLimitData: Data) {
+        var identifiedInstallation = installation
+        lock.lock()
+        let info = accountInfo
+        lock.unlock()
+        identifiedInstallation.accountEmail = info?.email
+        identifiedInstallation.planType = info?.planType
+        identifiedInstallation.accountType = info?.accountType
+
+        do {
+            let snapshot = try QuotaParser.appServerSnapshot(
+                from: rateLimitData,
+                installation: identifiedInstallation
+            )
+            finishIfNeeded(.success(snapshot))
+        } catch {
+            finishIfNeeded(.failure(error))
         }
     }
 
@@ -219,6 +326,7 @@ private final class AppServerOperation: @unchecked Sendable {
         lock.unlock()
 
         (process?.standardOutput as? Pipe)?.fileHandleForReading.readabilityHandler = nil
+        (process?.standardError as? Pipe)?.fileHandleForReading.readabilityHandler = nil
         if let process, process.isRunning {
             forceTerminate(process)
         }

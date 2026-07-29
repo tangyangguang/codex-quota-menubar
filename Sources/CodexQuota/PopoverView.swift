@@ -66,6 +66,15 @@ struct PopoverView: View {
                             .foregroundStyle(.secondary)
                         Text(Self.timeFormatter.string(from: snapshot.observedAt))
                     }
+                    if let installation = snapshot.installation {
+                        GridRow {
+                            Text("当前账号")
+                                .foregroundStyle(.secondary)
+                            Text(installation.accountEmail ?? installation.displayName)
+                                .lineLimit(1)
+                                .truncationMode(.middle)
+                        }
+                    }
                 }
                 .font(.system(size: 12))
             } else {
@@ -92,6 +101,7 @@ struct PopoverView: View {
                 }
                 Spacer()
                 Button {
+                    model.settingsDidAppear()
                     withAnimation(.easeInOut(duration: 0.15)) {
                         isShowingSettings = true
                     }
@@ -140,6 +150,37 @@ struct PopoverView: View {
 
                 Text("设置")
                     .font(.headline)
+            }
+
+            Divider()
+
+            VStack(alignment: .leading, spacing: 5) {
+                HStack {
+                    Text("显示哪个 Codex 账号")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                    if model.isInspectingInstallations {
+                        ProgressView()
+                            .controlSize(.mini)
+                    }
+                }
+
+                Picker("", selection: $model.selectedInstallationID) {
+                    Text("自动选择（优先 ChatGPT）")
+                        .tag("")
+                    ForEach(model.installations) { installation in
+                        Text("\(installation.displayName) · \(installation.accountLabel)")
+                            .tag(installation.id)
+                    }
+                }
+                .labelsHidden()
+                .pickerStyle(.menu)
+                .frame(maxWidth: .infinity, alignment: .leading)
+
+                Text("选定后只读取该安装，不会静默切换到其他账号。")
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
             }
 
             Divider()

@@ -33,11 +33,16 @@ final class AppModel {
     private(set) var snapshot: QuotaSnapshot?
     private(set) var isRefreshing = false
     private(set) var errorMessage: String?
+    private(set) var installations: [CodexInstallation]
+    private(set) var isInspectingInstallations = false
     private let provider = QuotaProvider()
     @ObservationIgnored private var automaticRefreshTimer: Timer?
     @ObservationIgnored private var isAsleep = false
+    @ObservationIgnored private var refreshRequestedWhileBusy = false
+    @ObservationIgnored private var didRegisterSleepWakeObservers = false
 
     private static let refreshIntervalDefaultsKey = "refreshIntervalSeconds"
+    private static let selectedInstallationDefaultsKey = "selectedCodexExecutable"
 
     /// 当前自动刷新间隔。修改后会持久化并重建定时器。
     var refreshInterval: RefreshInterval {
@@ -48,9 +53,29 @@ final class AppModel {
         }
     }
 
+    /// 空字符串表示自动选择；指定后只读取该安装，避免静默显示另一个账号。
+    var selectedInstallationID: String {
+        didSet {
+            guard oldValue != selectedInstallationID else { return }
+            if selectedInstallationID.isEmpty {
+                UserDefaults.standard.removeObject(forKey: Self.selectedInstallationDefaultsKey)
+            } else {
+                UserDefaults.standard.set(
+                    selectedInstallationID,
+                    forKey: Self.selectedInstallationDefaultsKey
+                )
+            }
+            refresh()
+        }
+    }
+
     init() {
         let stored = UserDefaults.standard.integer(forKey: Self.refreshIntervalDefaultsKey)
         refreshInterval = RefreshInterval(rawValue: stored) ?? .default
+        installations = QuotaProvider.availableInstallations()
+        selectedInstallationID = UserDefaults.standard.string(
+            forKey: Self.selectedInstallationDefaultsKey
+        ) ?? ""
     }
 
     var menuBarText: String {
@@ -58,18 +83,33 @@ final class AppModel {
         return "\(snapshot.remainingPercentText)%"
     }
 
+    var hasDataWarning: Bool {
+        guard let snapshot else { return false }
+        return errorMessage != nil || snapshot.isStale
+    }
+
     func refresh() {
-        guard !isRefreshing else { return }
+        guard !isRefreshing else {
+            // 用户刚切换账号或主动打开面板时，不应因为上一轮尚未结束而丢掉刷新。
+            refreshRequestedWhileBusy = true
+            return
+        }
         isRefreshing = true
         Task {
             do {
-                let value = try await provider.fetch()
+                let preferred = selectedInstallationID.isEmpty ? nil : selectedInstallationID
+                let value = try await provider.fetch(preferredExecutable: preferred)
                 snapshot = value
+                mergeInstallation(from: value)
                 errorMessage = value.isStale ? "本地记录已陈旧，打开 Codex 后再刷新" : nil
             } catch {
                 errorMessage = error.localizedDescription
             }
             isRefreshing = false
+            if refreshRequestedWhileBusy {
+                refreshRequestedWhileBusy = false
+                refresh()
+            }
         }
     }
 
@@ -85,6 +125,25 @@ final class AppModel {
     func panelDidAppear() {
         guard !isAsleep else { return }
         refresh()
+    }
+
+    /// 仅在用户打开设置时探测各安装对应的账号，不增加平时 30 秒刷新的成本。
+    func settingsDidAppear() {
+        guard !isInspectingInstallations else { return }
+        isInspectingInstallations = true
+        Task {
+            installations = await provider.inspectInstallations()
+            isInspectingInstallations = false
+        }
+    }
+
+    private func mergeInstallation(from snapshot: QuotaSnapshot) {
+        guard let installation = snapshot.installation else { return }
+        if let index = installations.firstIndex(where: { $0.id == installation.id }) {
+            installations[index] = installation
+        } else {
+            installations.append(installation)
+        }
     }
 
     /// 按当前间隔重建定时器（用户切换刷新间隔后调用）。
@@ -109,6 +168,8 @@ final class AppModel {
 
     /// 监听系统休眠与唤醒：休眠时停掉定时器，唤醒后立即刷新并恢复。
     private func registerSleepWakeObservers() {
+        guard !didRegisterSleepWakeObservers else { return }
+        didRegisterSleepWakeObservers = true
         let center = NSWorkspace.shared.notificationCenter
         center.addObserver(
             forName: NSWorkspace.willSleepNotification,
