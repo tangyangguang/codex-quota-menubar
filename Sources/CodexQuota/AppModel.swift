@@ -160,16 +160,14 @@ final class AppModel {
 
         // MenuBarExtra 面板关闭后，普通 RunLoop Timer 可能被 App Nap 大幅延后。
         // DispatchSourceTimer 配合显式 activity，保证用户设定的 30 秒后台刷新语义。
-        let timer = DispatchSource.makeTimerSource(queue: .global(qos: .utility))
+        let timer = DispatchSource.makeTimerSource(queue: .main)
         timer.schedule(
             deadline: .now() + .seconds(refreshInterval.rawValue),
             repeating: .seconds(refreshInterval.rawValue),
             leeway: .seconds(1)
         )
         timer.setEventHandler { [weak self] in
-            Task { @MainActor in
-                self?.refresh()
-            }
+            self?.refresh()
         }
         automaticRefreshTimer = timer
         timer.resume()
