@@ -36,7 +36,8 @@ final class AppModel {
     private(set) var installations: [CodexInstallation]
     private(set) var isInspectingInstallations = false
     private let provider = QuotaProvider()
-    @ObservationIgnored private var automaticRefreshTimer: Timer?
+    @ObservationIgnored private var automaticRefreshTimer: DispatchSourceTimer?
+    @ObservationIgnored private var automaticRefreshActivity: NSObjectProtocol?
     @ObservationIgnored private var isAsleep = false
     @ObservationIgnored private var refreshRequestedWhileBusy = false
     @ObservationIgnored private var didRegisterSleepWakeObservers = false
@@ -114,9 +115,9 @@ final class AppModel {
     }
 
     func startAutomaticRefresh() {
-        guard automaticRefreshTimer == nil else { return }
-
         registerSleepWakeObservers()
+        guard !isAsleep, automaticRefreshTimer == nil else { return }
+
         refresh()
         scheduleAutomaticRefresh()
     }
@@ -148,20 +149,44 @@ final class AppModel {
 
     /// 按当前间隔重建定时器（用户切换刷新间隔后调用）。
     func restartAutomaticRefresh() {
-        automaticRefreshTimer?.invalidate()
+        automaticRefreshTimer?.cancel()
         automaticRefreshTimer = nil
         scheduleAutomaticRefresh()
     }
 
     private func scheduleAutomaticRefresh() {
-        guard !isAsleep else { return }
-        let timer = Timer(timeInterval: refreshInterval.seconds, repeats: true) { [weak self] _ in
+        guard !isAsleep, automaticRefreshTimer == nil else { return }
+        beginAutomaticRefreshActivity()
+
+        // MenuBarExtra 面板关闭后，普通 RunLoop Timer 可能被 App Nap 大幅延后。
+        // DispatchSourceTimer 配合显式 activity，保证用户设定的 30 秒后台刷新语义。
+        let timer = DispatchSource.makeTimerSource(queue: .global(qos: .utility))
+        timer.schedule(
+            deadline: .now() + .seconds(refreshInterval.rawValue),
+            repeating: .seconds(refreshInterval.rawValue),
+            leeway: .seconds(1)
+        )
+        timer.setEventHandler { [weak self] in
             Task { @MainActor in
                 self?.refresh()
             }
         }
-        RunLoop.main.add(timer, forMode: .common)
         automaticRefreshTimer = timer
+        timer.resume()
+    }
+
+    private func beginAutomaticRefreshActivity() {
+        guard automaticRefreshActivity == nil else { return }
+        automaticRefreshActivity = ProcessInfo.processInfo.beginActivity(
+            options: [.userInitiatedAllowingIdleSystemSleep],
+            reason: "按用户设置在后台刷新 Codex 额度"
+        )
+    }
+
+    private func endAutomaticRefreshActivity() {
+        guard let activity = automaticRefreshActivity else { return }
+        ProcessInfo.processInfo.endActivity(activity)
+        automaticRefreshActivity = nil
     }
 
     // MARK: - 休眠 / 唤醒
@@ -189,8 +214,9 @@ final class AppModel {
 
     private func pauseAutomaticRefresh() {
         isAsleep = true
-        automaticRefreshTimer?.invalidate()
+        automaticRefreshTimer?.cancel()
         automaticRefreshTimer = nil
+        endAutomaticRefreshActivity()
     }
 
     private func resumeAutomaticRefresh() {
